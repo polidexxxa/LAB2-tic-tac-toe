@@ -10,6 +10,10 @@ namespace EvalWeights {
     constexpr int OPEN_FOUR = 50000;
     constexpr int OPEN_THREE = 3000;
     constexpr int OPEN_TWO = 200;
+
+    constexpr int EVAL_LIMIT = WIN_SCORE / 2;
+
+    constexpr int OPPONENT_FACTOR = 2;
 }
 
 struct SearchResult {
@@ -20,96 +24,153 @@ struct SearchResult {
 
 class MinimaxEngine {
 private:
+    static constexpr int INF = 2000000;
+    static constexpr int MIN_DEPTH = 2;
+    static constexpr int DIRECTIONS[4][2] = {
+        {1, 0}, {0, 1}, {1, 1}, {1, -1}
+    };
+
     long long node_counter = 0;
 
     int EvaluateWindow(int my_count, int opp_count) const {
         if (my_count > 0 && opp_count > 0) {
             return 0;
         }
-        static constexpr int scores[6] = {
-            0, 10, EvalWeights::OPEN_TWO, EvalWeights::OPEN_THREE, EvalWeights::OPEN_FOUR, EvalWeights::WIN_SCORE
+        static constexpr int scores[5] = {
+            0, 10, EvalWeights::OPEN_TWO, EvalWeights::OPEN_THREE, EvalWeights::OPEN_FOUR
         };
 
-        if (my_count > 0) return scores[my_count];
-        if (opp_count > 0) return -scores[opp_count] * 2;
-
+        if (my_count > 0) {
+            return scores[my_count < 4 ? my_count : 4];
+        }
+        if (opp_count > 0) {
+            return -scores[opp_count < 4 ? opp_count : 4] * EvalWeights::OPPONENT_FACTOR;
+        }
         return 0;
     }
 
+    int ClampScore(int score) const {
+        if (score > EvalWeights::EVAL_LIMIT) return EvalWeights::EVAL_LIMIT;
+        if (score < -EvalWeights::EVAL_LIMIT) return -EvalWeights::EVAL_LIMIT;
+        return score;
+    }
+
+    
     int EvaluateBoard(const Board& board, Cell ai_player) const {
-        Cell human_player = GetOpponent(ai_player);
+        auto entries = board.GetOccupiedCellsList();
+        auto* it = entries.GetEnumerator();
         int total_score = 0;
 
-        if (board.GetMoveCount() == 0) return 0;
+        while (it->MoveNext()) {
+            Point stone = it->GetCurrent().key;
 
-        int min_x = board.GetMinX() - 1;
-        int max_x = board.GetMaxX() + 1;
-        int min_y = board.GetMinY() - 1;
-        int max_y = board.GetMaxY() + 1;
-
-        static const int directions[4][2] = {
-            {1, 0}, {0, 1}, {1, 1}, {1, -1}
-        };
-
-        for (int x = min_x; x <= max_x; ++x) {
-            for (int y = min_y; y <= max_y; ++y) {
-                Point start(x, y);
-
-                for (const auto& dir : directions) {
+            for (const auto& dir : DIRECTIONS) {
+                for (int k = 0; k < 5; ++k) {
+                    bool is_first_stone = true;
                     int my_count = 0;
                     int opp_count = 0;
 
-                    for (int step = 0; step < 5; ++step) {
-                        Point curr(start.x + dir[0] * step, start.y + dir[1] * step);
-                        Cell c = board.GetCell(curr);
+                    for (int j = 0; j < 5; ++j) {
+                        Point p(stone.x + (j - k) * dir[0],
+                                stone.y + (j - k) * dir[1]);
+                        Cell c = board.GetCell(p);
+
+                        if (c != Cell::Empty && j < k) {
+                            is_first_stone = false;
+                            break;
+                        }
                         if (c == ai_player) my_count++;
-                        else if (c == human_player) opp_count++;
+                        else if (c != Cell::Empty) opp_count++;
                     }
 
-                    total_score += EvaluateWindow(my_count, opp_count);
+                    if (is_first_stone) {
+                        total_score += EvaluateWindow(my_count, opp_count);
+                    }
                 }
             }
         }
+
+        delete it;
         return total_score;
     }
 
-    int AlphaBeta(Board& board, int depth, int alpha, int beta, bool is_maximizing, Cell ai_player, Point last_move) {
-        node_counter++;
-        Cell current_mover = is_maximizing ? GetOpponent(ai_player) : ai_player;
-        int q = is_maximizing ? 1 : -1;
+    
+    int MoveDelta(const Board& board, const Point& pt, bool by_ai, Cell ai_player) const {
+        int delta = 0;
 
-        if (board.GetMoveCount() > 0 && board.CheckWin(last_move, current_mover)) {
-            return -q * (EvalWeights::WIN_SCORE - (10 - depth));
-        }
+        for (const auto& dir : DIRECTIONS) {
+            for (int k = 0; k < 5; ++k) {
+                int my_count = 0;
+                int opp_count = 0;
 
-        if (depth == 0) {
-            return EvaluateBoard(board, ai_player);
+                for (int j = 0; j < 5; ++j) {
+                    if (j == k) continue;
+
+                    Point p(pt.x + (j - k) * dir[0],
+                            pt.y + (j - k) * dir[1]);
+                    Cell c = board.GetCell(p);
+
+                    if (c == ai_player) my_count++;
+                    else if (c != Cell::Empty) opp_count++;
+                }
+
+                int before = EvaluateWindow(my_count, opp_count);
+
+                if (by_ai) my_count++;
+                else opp_count++;
+
+                delta += EvaluateWindow(my_count, opp_count) - before;
+            }
         }
+        return delta;
+    }
+
+    
+    int AlphaBeta(Board& board, int depth, int alpha, int beta, bool is_maximizing,
+                    Cell ai_player, int score, int ply, Point* best_out) {
 
         ListSequence<Point> candidates = board.GetCandidateMoves();
         if (candidates.GetLength() == 0) {
-            return 0;
+            return ClampScore(score);
         }
 
         Cell current_player = is_maximizing ? ai_player : GetOpponent(ai_player);
-        int best_eval = -q * 2000000;
+        int win_value = EvalWeights::WIN_SCORE - (ply + 1);
+        int best_eval = is_maximizing ? -INF : INF;
 
         IEnumerator<Point>* it = candidates.GetEnumerator();
         while (it->MoveNext()) {
             Point pt = it->GetCurrent();
-            board.MakeMove(pt, current_player);
+            ++node_counter;
 
-            int eval = AlphaBeta(board, depth - 1, alpha, beta, !is_maximizing, ai_player, pt);
-            board.UndoMove(pt);
+            int eval;
 
-            if (q * eval > q * best_eval) {
-                best_eval = eval;
+            if (board.CheckWin(pt, current_player)) {
+                eval = is_maximizing ? win_value : -win_value;
+            } else {
+                int child_score = score + MoveDelta(board, pt, is_maximizing, ai_player);
+
+                if (depth == 1) {
+                    eval = ClampScore(child_score);
+                } else {
+                    board.MakeMove(pt, current_player);
+                    eval = AlphaBeta(board, depth - 1, alpha, beta, !is_maximizing,
+                                    ai_player, child_score, ply + 1, nullptr);
+                    board.UndoMove(pt);
+                }
             }
 
             if (is_maximizing) {
-                if (eval > alpha) alpha = eval;
+                if (eval > best_eval) {
+                    best_eval = eval;
+                    if (best_out) *best_out = pt;
+                }
+                if (best_eval > alpha) alpha = best_eval;
+                if (best_eval >= win_value) break;
             } else {
-                if (eval < beta) beta = eval;
+                if (eval < best_eval) best_eval = eval;
+                if (best_eval < beta) beta = best_eval;
+                if (best_eval <= -win_value) break;
             }
 
             if (beta <= alpha) {
@@ -121,73 +182,23 @@ private:
         return best_eval;
     }
 
-    bool FindWinningMove(Board& board, Cell player, const ListSequence<Point>& candidates, Point& winning_move) {
-        IEnumerator<Point>* it = candidates.GetEnumerator();
-
-        while (it->MoveNext()) {
-            Point pt = it->GetCurrent();
-
-            board.MakeMove(pt, player);
-            bool win = board.CheckWin(pt, player);
-            board.UndoMove(pt);
-
-            if (win) {
-                winning_move = pt;
-                delete it;
-                return true;
-            }
-        }
-        delete it;
-        return false;
-    }
-
 public:
     MinimaxEngine() = default;
 
     SearchResult FindBestMove(Board& board, Cell ai_player, int depth = 3) {
         node_counter = 0;
+
+        if (depth < MIN_DEPTH) {
+            depth = MIN_DEPTH;
+        }
+
+        Point best_pt(0, 0);
+        int start_score = EvaluateBoard(board, ai_player);
+
+        int best_score = AlphaBeta(board, depth, -INF, INF, true,
+                                   ai_player, start_score, 0, &best_pt);
+
         SearchResult result;
-
-        ListSequence<Point> candidates = board.GetCandidateMoves();
-        if (candidates.GetLength() == 0) {
-            result.best_move = Point(0, 0);
-            return result;
-        }
-
-        Cell human_player = GetOpponent(ai_player);
-        Point forced_move;
-
-        if (FindWinningMove(board, ai_player, candidates, forced_move)) {
-            return { forced_move, EvalWeights::WIN_SCORE, ++node_counter };
-        }
-
-        if (FindWinningMove(board, human_player, candidates, forced_move)) {
-            return { forced_move, EvalWeights::WIN_SCORE / 2, ++node_counter };
-        }
-
-        Point best_pt = candidates.Get(0);
-        int best_score = -2000000;
-        int alpha = -2000000;
-        int beta = 2000000;
-
-        IEnumerator<Point>* it = candidates.GetEnumerator();
-        while (it->MoveNext()) {
-            Point pt = it->GetCurrent();
-            board.MakeMove(pt, ai_player);
-
-            int score = AlphaBeta(board, depth - 1, alpha, beta, false, ai_player, pt);
-            board.UndoMove(pt);
-
-            if (score > best_score) {
-                best_score = score;
-                best_pt = pt;
-            }
-            if (score > alpha) {
-                alpha = score;
-            }
-        }
-        delete it;
-
         result.best_move = best_pt;
         result.score = best_score;
         result.evaluated_nodes = node_counter;
